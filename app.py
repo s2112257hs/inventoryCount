@@ -80,7 +80,6 @@ UPLOAD_FORM_TEMPLATE = """
 VIEW_PHOTO_TEMPLATE = """
 <h2>Photo for {{ id }}</h2>
 <img src="{{ image_url }}" width="300"><br><br>
-<a href="{{ url_for('photo', id=id) }}">Refresh</a>
 """
 
 @app.route('/photo/<id>')
