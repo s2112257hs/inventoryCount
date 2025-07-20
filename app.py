@@ -1,39 +1,55 @@
-from flask import Flask, request, render_template_string, redirect, url_for
+import os
+from flask import Flask, request, render_template_string, redirect, url_for, session
 from supabase import create_client, Client
+from flask_session import Session
+from datetime import timedelta
+from dotenv import load_dotenv
+
+# Load environment variables from .env
+load_dotenv()
 
 app = Flask(__name__)
+app.config['SESSION_TYPE'] = 'filesystem'
+app.config['PERMANENT_SESSION_LIFETIME'] = timedelta(days=30)
+app.config['SECRET_KEY'] = os.environ.get('SECRET_KEY', 'default_secret_key')
+app.config['PORT'] = int(os.environ.get('PORT', 5000))
+Session(app)
 
 # Initialize Supabase client
-SUPABASE_URL = 'https://piqzzdrerzfhmqhumzxc.supabase.co'  # e.g., https://your_project_id.supabase.co
-SUPABASE_KEY = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6InBpcXp6ZHJlcnpmaG1xaHVtenhjIiwicm9sZSI6ImFub24iLCJpYXQiOjE3NTIyNjY1MDUsImV4cCI6MjA2Nzg0MjUwNX0.2eOimozU0BHy4uTl9TsA4fyQPBC1qUm-_K3DECuZTuQ'
-supabase: Client = create_client(SUPABASE_URL, SUPABASE_KEY)
+supabase: Client = create_client(os.environ.get('SUPABASE_URL'), os.environ.get('SUPABASE_KEY'))
 
 # HTML templates
+LOGIN_TEMPLATE = """
+<h2>Login</h2>
+{% if error %}
+    <p style="color: red;">{{ error }}</p>
+{% endif %}
+<form method="POST" action="{{ url_for('login', next=next) }}">
+    <label>Email: <input type="email" name="email" required></label><br>
+    <label>Password: <input type="password" name="password" required></label><br>
+    <input type="submit" value="Login">
+</form>
+"""
+
 UPLOAD_FORM_TEMPLATE = """
 <h2>Upload Photo for {{ id }}</h2>
 {% if error %}
     <p style="color: red;">{{ error }}</p>
 {% endif %}
 <form method="POST" enctype="multipart/form-data" action="{{ url_for('upload', id=id) }}">
-    <!-- Hidden file inputs -->
     <input type="file" id="fileInput" name="photo" accept="image/*" style="display:none">
     <input type="file" id="cameraInput" name="photo" accept="image/*" capture="environment" style="display:none">
-
-    <!-- Visible buttons -->
     <button type="button" onclick="document.getElementById('fileInput').click()">📁 Choose from Files</button>
     <button type="button" onclick="document.getElementById('cameraInput').click()">📷 Take Photo</button>
-
-    <!-- Preview Section -->
     <div id="previewContainer" style="margin-top: 1em; display: none;">
         <img id="previewImage" src="#" alt="Image Preview" style="max-width: 100%; height: auto; border: 1px solid #ccc;"><br><br>
         <button type="button" onclick="clearImage()">❌ Remove Photo</button>
     </div>
-
-    <!-- Submit Section -->
     <div style="margin-top: 1em;">
         <input type="submit" value="✅ Upload Photo">
     </div>
 </form>
+<p><a href="{{ url_for('logout') }}">Logout</a></p>
 
 <script>
     const fileInput = document.getElementById('fileInput');
@@ -80,29 +96,101 @@ UPLOAD_FORM_TEMPLATE = """
 VIEW_PHOTO_TEMPLATE = """
 <h2>Photo for {{ id }}</h2>
 <img src="{{ image_url }}" width="300"><br><br>
+{% if error %}
+    <p style="color: red;">{{ error }}</p>
+{% endif %}
+<form method="POST" action="{{ url_for('delete_photo', id=id) }}">
+    <input type="submit" value="Delete Photo" onclick="return confirm('Are you sure you want to delete this photo?');">
+</form>
+<a href="{{ url_for('logout') }}">Logout</a>
 """
 
+def require_auth(f):
+    def decorated(*args, **kwargs):
+        if 'user' not in session:
+            next_url = request.url
+            return redirect(url_for('login', next=next_url))
+        try:
+            supabase.auth.get_user(session.get('access_token'))
+        except Exception as e:
+            print(f"Token validation error: {str(e)}")
+            if 'refresh_token' in session:
+                try:
+                    response = supabase.auth.refresh_session(session['refresh_token'])
+                    if response.session:
+                        session['access_token'] = response.session.access_token
+                        session['refresh_token'] = response.session.refresh_token
+                        supabase.postgrest.auth(response.session.access_token)
+                    else:
+                        session.pop('user', None)
+                        session.pop('access_token', None)
+                        session.pop('refresh_token', None)
+                        return redirect(url_for('login', next=request.url))
+                except Exception as e:
+                    print(f"Token refresh error: {str(e)}")
+                    session.pop('user', None)
+                    session.pop('access_token', None)
+                    session.pop('refresh_token', None)
+                    return redirect(url_for('login', next=request.url))
+            else:
+                session.pop('user', None)
+                session.pop('access_token', None)
+                return redirect(url_for('login', next=request.url))
+        return f(*args, **kwargs)
+    decorated.__name__ = f.__name__
+    return decorated
+
+@app.route('/login', methods=['GET', 'POST'])
+def login():
+    next_url = request.args.get('next', url_for('photo', id='default'))
+    if request.method == 'POST':
+        email = request.form.get('email')
+        password = request.form.get('password')
+        try:
+            response = supabase.auth.sign_in_with_password({'email': email, 'password': password})
+            if response.user:
+                session['user'] = response.user.id
+                session['access_token'] = response.session.access_token
+                session['refresh_token'] = response.session.refresh_token
+                session.permanent = True
+                supabase.postgrest.auth(response.session.access_token)
+                return redirect(next_url)
+            else:
+                return render_template_string(LOGIN_TEMPLATE, error="Invalid credentials. Please try again.", next=next_url)
+        except Exception as e:
+            print(f"Login error: {str(e)}")
+            return render_template_string(LOGIN_TEMPLATE, error=f"Login failed: {str(e)}. Please try again.", next=next_url)
+    return render_template_string(LOGIN_TEMPLATE, error=None, next=next_url)
+
+@app.route('/logout')
+def logout():
+    next_url = request.args.get('next', url_for('login'))
+    session.pop('user', None)
+    session.pop('access_token', None)
+    session.pop('refresh_token', None)
+    supabase.auth.sign_out()
+    return redirect(next_url)
+
 @app.route('/photo/<id>')
+@require_auth
 def photo(id):
-    file_path = f"uploads/{id}.jpg"
+    file_path = f"Uploads/{id}.jpg"
     bucket_name = 'photos'
     try:
-        # Check if the file exists in the bucket
-        files = supabase.storage.from_(bucket_name).list(path="uploads")
+        files = supabase.storage.from_(bucket_name).list(path="Uploads")
         file_exists = any(file['name'] == f"{id}.jpg" for file in files)
         
         if file_exists:
-            # Get public URL for the existing file
             image_url = supabase.storage.from_(bucket_name).get_public_url(file_path)
-            return render_template_string(VIEW_PHOTO_TEMPLATE, id=id, image_url=image_url)
+            return render_template_string(VIEW_PHOTO_TEMPLATE, id=id, image_url=image_url, error=None)
         else:
-            # File doesn't exist, show upload form
             return render_template_string(UPLOAD_FORM_TEMPLATE, id=id, error=None)
     except Exception as e:
         print(f"Error checking file: {str(e)}")
         return render_template_string(UPLOAD_FORM_TEMPLATE, id=id, error="Failed to check for existing photo. Please try uploading.")
 
 @app.route('/upload/<id>', methods=['POST'])
+@require_auth
 def upload(id):
     if 'photo' not in request.files:
         return render_template_string(UPLOAD_FORM_TEMPLATE, id=id, error="No photo uploaded. Please select a file and try again.")
@@ -114,23 +202,17 @@ def upload(id):
     if photo:
         try:
             print("Received file:", photo.filename, photo.content_type)
-            # Generate file path for Supabase
-            file_path = f"uploads/{id}.jpg"
+            file_path = f"Uploads/{id}.jpg"
             bucket_name = 'photos'
 
-            # Validate file type
             if not photo.content_type.startswith('image/'):
                 return render_template_string(UPLOAD_FORM_TEMPLATE, id=id, error="Only image files are allowed. Please select an image and try again.")
 
-            # Read the file content
             file_content = photo.read()
-
-            # Check file size (e.g., 5MB limit)
-            if len(file_content) > 5 * 1024 * 1024:
-                return render_template_string(UPLOAD_FORM_TEMPLATE, id=id, error="File too large. Maximum size is 5MB. Please select a smaller file and try again.")
+            if len(file_content) > 2 * 1024 * 1024:
+                return render_template_string(UPLOAD_FORM_TEMPLATE, id=id, error="File too large. Maximum size is 2MB. Please select a smaller file and try again.")
 
             print("Uploading to path:", file_path)
-            # Upload to Supabase Storage
             response = supabase.storage.from_(bucket_name).upload(
                 file_path,
                 file_content,
@@ -140,7 +222,6 @@ def upload(id):
                 }
             )
 
-            # Check for upload success
             print("Upload response:", response)
             if hasattr(response, 'path') and response.path == file_path:
                 print("Upload successful, redirecting to /photo/", id)
@@ -161,5 +242,21 @@ def upload(id):
                 error_message = "Upload failed due to storage permission settings. Please try uploading again or contact support."
             return render_template_string(UPLOAD_FORM_TEMPLATE, id=id, error=error_message)
 
+@app.route('/delete/<id>', methods=['POST'])
+@require_auth
+def delete_photo(id):
+    file_path = f"Uploads/{id}.jpg"
+    bucket_name = 'photos'
+    try:
+        supabase.storage.from_(bucket_name).remove([file_path])
+        print(f"Deleted photo: {file_path}")
+        return redirect(url_for('photo', id=id))
+    except Exception as e:
+        print(f"Delete error: {str(e)}")
+        error_message = f"Error deleting photo: {str(e)}. Please try again."
+        if "row-level security" in str(e).lower():
+            error_message = "Delete failed due to storage permission settings. Please try again or contact support."
+        return render_template_string(VIEW_PHOTO_TEMPLATE, id=id, image_url=supabase.storage.from_(bucket_name).get_public_url(file_path), error=error_message)
+
 if __name__ == '__main__':
-    app.run(host='0.0.0.0', port=5000, debug=True)
+    app.run(host='0.0.0.0', port=app.config['PORT'], debug=False)
