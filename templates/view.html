@@ -1,0 +1,15 @@
+{% extends "base.html" %}
+{% block title %}View{% endblock %}
+{% block content %}
+<h2 class="mb-3 fw-bold">Photo for ID: <span class="text-secondary">{{ id }}</span></h2>
+
+<img src="{{ image_url }}" class="img-fluid border rounded shadow-sm mb-3" alt="Inventory Photo">
+
+{% if error %}
+    <div class="alert alert-danger">{{ error }}</div>
+{% endif %}
+
+<form method="POST" action="{{ url_for('delete_photo', id=id) }}">
+    <button type="submit" class="btn btn-danger w-100 fw-bold" onclick="return confirm('Are you sure you want to delete this photo?');">❌ Delete Photo</button>
+</form>
+{% endblock %}
